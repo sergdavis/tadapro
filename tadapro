@@ -1,0 +1,1083 @@
+#!/usr/bin/env python
+
+pName, pVersion = "TaDaPro 0.8.9".split()
+cpright = "Copyright (C) 2008-2013 Sergio M. Davis <sergdavis@gmail.com>"
+
+import os, os.path, string, getopt, copy, re, textwrap, readline
+from sys import stdout, stderr, argv, exit, version_info
+from math import *
+from operator import *
+from random import random
+
+rcfile = os.path.expanduser('~/.tadaprorc')
+floatformat = '%10.10g'
+
+def product(s): return reduce(mul, s, 1.0)
+def average(s): return sum(s)/float(len(s))
+def sampledeviation(s): return sqrt((average([z**2 for z in s])-average(s)**2)*float(len(s))/float(len(s)-1))
+def deviation(s): return sqrt(average([z**2 for z in s])-average(s)**2)
+def variance(s): return (average([z**2 for z in s])-average(s)**2)
+def samplevariance(s): return (average([z**2 for z in s])-average(s)**2)*float(len(s))/float(len(s)-1)
+
+reducers = "min max sum product average deviation sampledeviation variance samplevariance".split()
+
+fitdata = {'linear': ('x,y,x2,y2,xy', lambda m,n: 'y=%.15e*x+%.15e' % (m,n)), 
+           'exp': ('x,lny,x2,lny2,xlny', lambda m,n: 'y=%f*exp(%f*x)' % (exp(n),m)),
+           'log': ('lnx,y,lnx2,y2,ylnx', lambda m,n: 'y=%f*ln(x)+%f' % (m,n)),
+           'powers': ('lnx,lny,lnx2,lny2,lnxlny', lambda m,n: 'y=%.10f*x^(%.10f)' %(exp(n),m))}
+
+arghint = ('shell s:=@(SHELL) ...','correlate t: i: t: i:','copy t: s: r:=* r:=*','crop t: r: r:','delete t:','eval t: e:',
+           'define s: s: s: s:', 'celleval t: e: r:=* r:=* b:=false','filter t: e:','help c:=*','join a: t: t:','cell t: i: i:',
+           'insert a: t: i: i:=-1', 'load f: s:=.default. =.default. i:=0','new s: i: i:','print t: i:=1 i:=-1', 'arrange a: t: s:',
+           'drop t: i:','dropped t:','remove a: t: r:','resize t: i: i:','size a: t:','pipes','inspect m:','function s: s: e:', 
+           'split a: t: i: s:=.default.', 'reduce ='+'|'.join(reducers)+' t: i:','fit ='+'|'.join(fitdata.keys()+['best'])+' t: i:=1 i:=2',
+           'restore t: =*', 'reshape t: i: i:', 'subsample t: i: i:=0', 'plot t: i:=1 i:=2 ...','quit','save t: f:=','write ...',
+           'histogram t: i: i: s: =.default. =.default.','set s:=* =true','unset v:','sort t: i: =ascending|descending','tables',
+           'transpose t:','realfft t: i: s: =magnitude|components b:=false b:=true','complexfft t: i: i: s: =magnitude|components b:=false b:=true',
+           'view t:','unitconvert t: i: s: s:','findzero t: i:=1 i:=2','running ='+'|'.join(reducers)+' t: i: i: i: s:', 'history s:=*','repeat i:', 
+           'nonlinfit t: i: i: s: s: n:=1E-03 i:100', 'findabsmax t: i: i:', 'interpolate =linear|spline t: i:')
+
+initcode = """define alias s:new c:old; \"Creates a new name for a command (or macro).\"; set alias[$new] $old; end ; 
+              define move t:orig dest; \"Renames a table.\"; copy $orig $dest ; delete $orig ; end ; define head t:table i:rows=10; 
+              \"Shows the first rows of a table.\"; print $table 1 $rows ; end ; define tail t:table i:rows=10; \"Shows the last rows of a table.\"; 
+              print $table {-1 * $rows + 1} ; end ; define edit t:table ; \"Edits a table in an external editor.\"; save $table .tadatmp ; 
+              shell @(EDITOR) .tadatmp; load .tadatmp $table ; shell rm .tadatmp ; end ; define tabulate s:table e:expr min max i:points ;
+              \"Generates a table from an analytical function.\"; new $table 2 $points ; eval $table $1=$min+($max-$min)*(float($0-1)/$points); 
+              eval $table $2=$expr ; end ; define integrate t:table i:xcolumn i:ycolumn from to ; 
+              \"Computes the integral of a table within the given limits\"; copy $table inttmp ; 
+              filter inttmp (${$xcolumn}>=$from)and(${$xcolumn}<=$to) ; set sumy [[reduce sum inttmp $ycolumn]] ;
+              set N [[rows inttmp]] ; delete inttmp ; return {$sumy*($to-$from)/$N} ; end ; 
+              define rows t:table; \"Return the number of rows of the given table.\"; return [[size rows $table]]; end ; 
+              define columns t:table; \"Return the number of columns of the given table.\"; return [[size columns $table]]; end;
+              define differentiate t:table i:xcolumn i:ycolumn s:newtable ; \"Computes the derivative of a table\";
+              copy $table $newtable {$xcolumn}-{$ycolumn} ; set nc [[columns $newtable]] ; if {$nc > 2} ;
+              remove columns $newtable 2-{$nc-1} ; end ; set nr [[rows $newtable]] ;
+              celleval $newtable '([2, $j+1]-[2, $j-1])/([1, $j+1]-[1, $j-1])' rangecols=2-2 rangerows=2-{$nr-1} ;
+              remove rows $newtable $nr-$nr ; remove rows $newtable 1-1 ; end ; define setpipe s:name s:command ;
+              \"Defines a new \'pipe\' to be used with the \'load\' command.\"; set pipe[$name] '$command' ; end ;
+              define findcross t:table i:xcol i:y1col i:y2col ; insert columns $table 1 0 ; eval $table $1=${$y1col+1}-${$y2col+1} ;
+              findzero $table {$xcol+1} 1 ; remove columns $table 1-1 ; end ; define findmax t:table i:x i:y ; differentiate $table $x $y tmp.dat ;
+              findzero tmp.dat 1 2 ; end ; define quit ; \"Exits TaDaPro.\" ; set sys[interactive] false; end ; 
+              setpipe noblanks \"grep -v \'^$\'\" ; setpipe nosharps \"grep -v \'^#\'\" ; setpipe .default. \'$pipe[noblanks] | $pipe[nosharps]\' ; 
+              setpipe gzipdecompress \"gzip -d\" ; set autoload \"load file=$file\"; set pager \"less -n \" ; set prompt \"tadapro> \";
+              set historyfile \"~/.tadapro.history\"; set sys[debug] false ; set sys[interactive] false; alias ! shell ; 
+              alias ? help ; alias : repeat; alias exit quit ; define debug b:value ; \"Enables/disables debug mode.\"; 
+              set sys[debug] $value; end """
+
+sre = {'varexpand': r'(\$([\w\.]+)\b)', 'arrayexpand': r'(\$([\w\.]+)\[([\w\.]+)\])',
+       'envexpand': r'(@\((\w+)\))', 'mathexpand': r'({([^{}\[\]]+)})','splcmd': r'((\W+)(\w+))',
+       'tblarrayexpand': r'(\$\[(\d+)\])', 'cmdexpand': r'(\[\[([^{}\[\]]+)\]\])'}
+
+indentable = "define if while for".split()
+
+programHelp = """%s version %s\nUsage: %s [-e <script>] [-c <code>] [-O opt=val] [tablefile ....]""" % (pName, pVersion, pName.lower())
+
+banner = """%(name)s version %(ver)s, running on Python %(pyver)s\n%(cpright)s
+%(name)s is open source software, licensed under the GNU GPL version 2\n
+Type \'help\' for a list of available commands and macros.\n"""
+
+errors = {'unkcmd': 'Unknown command, \'%(cmd)s\'', 'unkvar': 'Unknown variable, \'%(var)s\'', 'outrang': '%(type)s out of range',
+          'misarg': 'Missing non-optional argument \'%(arg)s\' in \'%(cmd)s\'\n%(cmd)s %(args)s','nocapa': '%(msg)s',
+          'tooarg': 'Too many arguments for \'%(cmd)s\'\n%(cmd)s %(args)s','unkpip': 'Unknown pipe, \'%(pipe)s\'',
+          'invarg': 'Expected %(type)s, got \'%(val)s\'', 'szmism': 'Both %(type)s must have the same number of %(val)s',
+          'evlerr': 'Expression \'%(expr)s\' is not a %(type)s','invfit': 'Cannot fit \'%(fit)s\', columns %(x)d and %(y)d',
+          'unkunit': 'Unknown unit, \'%(unit)s\'', 'unitmism': 'Unit mismatch, \'%(u1)s\' to \'%(u2)s\'', 
+          'notcmp': '%(obj)s is not %(type)s. %(obj)s is %(val)s.', 'generr': '%(msg)s', 'synerr': '%(msg)s'}
+
+formats = { float: lambda x: (floatformat % x).ljust(12), int: lambda x: '  %10d' % x,
+            list: lambda x: fmtjoin(cfmt,x, '  '), dict: lambda x: '<variable array>' }
+
+argtype = {'t': 'table name', 'c': 'command', 'i': 'integer', 'f': 'file name', 'm': 'macro name', 'b': 'true|false', 'n': 'number', 
+           'r': 'range', 'e': 'expression', 's': 'string', 'v': 'variable name', 'a': 'columns|rows', '': 'any numeric or string value'}
+
+if version_info[0] < 3 and version_info[1] < 3: exit('[Error] %s needs at least Python 2.3 (What year are you living in??)' % pName)
+if version_info[0] >= 3: exit('[Error] %s does not work yet under Python 3' % pName)
+if version_info[1] < 4:            # Emulations for Python 2.3 compatibility
+   from sets import Set as set
+   def sorted(seq):
+       tmp = [x for x in seq]; tmp.sort(); return tmp
+if version_info[1] < 5:
+   all = lambda itr: False not in itr             # like all(itr) in 2.5
+   any = lambda itr: True in itr                  # like any(itr) in 2.5
+
+same = lambda x: x
+ift = lambda cond, t, f: (t, f)[not cond]
+tokenlist = lambda t, s=' ', r=' ': [x.strip(r) for x in t.split(s)]
+fmtjoin = lambda f, seq, sep=' ': sep.join([f(x) for x in seq])
+parsekw = lambda t, kw: dict(zip(kw, tokenlist(t)))
+ftodict = lambda keys, f: dict(zip(keys, [f(x) for x in keys]))
+accessor = lambda obj: (lambda j, i, v: obj[j][i])
+invaccessor = lambda obj: (lambda j, i, v: obj[i][j])
+ignorable = lambda s: (s.strip() == '') or (s.startswith('#'))
+expandenv = lambda x: sre['envexpand'].sub(lambda z: os.getenv(z.group(2)), x)
+
+def before(d, text, incld=False, defv=''): return ((d in text) and [text[:text.find(d)]+ift(incld,d,'')] or [defv])[0]
+
+def after(d, text, incld=False, defv=''): return ((d in text) and [ift(incld,d,'')+text[text.find(d)+len(d):]] or [defv])[0]
+
+def updateinplace(obj, d): [ obj.__setitem__(k, v) for k, v in d.iteritems() ]
+
+def replaceall(d, text):
+    for k, v in d.iteritems(): text = text.replace(k, v)
+    return text
+
+def crdc(x):
+    if x.lower() in ('true', 'false'): return x.lower() == 'true'
+    if not all([ (z in string.digits+'.+-eE') for z in x]): return x
+    if '-' in x and not x.startswith('-') and (not 'e' in x and not 'E' in x):
+       return tuple([int(z) for z in x.split('-')])
+    try: return eval(x)
+    except: return x
+
+def cfmt(x, quoted=False):
+    for k, v in formats.iteritems():
+        if isinstance(x, k): return v(x)
+    return ift(quoted, '\"'+str(x)+'\"', str(x))
+
+def sfmt(x): 
+    if ':' in x: x = x.split(':')[1]
+    if '|' in x: return '<'+before('=',x)+'>'
+    if '=' in x: return '['+before('=', x)+']'
+    if x.endswith('...'): return '['+x.replace('...', '')+']'
+    else: return '<'+x+'>'
+
+def argname(x):
+    if x[0] in ('[', '<'): x = x[1:-1] 
+    if '=' in x: x = x.split('=')[0]
+    if ':' in x: return x.split(':')[1] 
+    else: return x
+
+def expandrange(r, lim, invert=False):
+    a, b = ift(r[0] == -1, 0, r[0]-1), ift(r[1] == -1, lim, r[1])
+    rg = range(a, b)
+    if not invert: return rg
+    else: return [x for x in range(0, lim) if x not in rg]
+
+def findbetween(text, d1, d2, pos=0):
+    p = text.find(d1, pos)
+    q = text.find(d2, p+len(d1))
+    return (p, q)
+
+def finddeepest(text, t1, t2):
+    for perm in [(t1, t2), (t2, t1)]:
+        p0 = 0
+        while True:
+              p = text.find(perm[0], p0)
+              if p < 0: break
+              if text.find(perm[1], p+len(perm[0])) < 0 and text.find(perm[0], p+len(perm[0])) < 0:
+                 return (p, perm[0])
+              p0 = p+len(perm[0])
+    return (-1, '')
+
+def complete_result(text, state, alts):
+    return ([x+ift(x.endswith('='), '',' ') for x in alts if x.startswith(text)]+[None])[state]
+
+def LinearRegression(nd, sx, sy, sx2, sy2, sxy):
+    r2 = (sxy-sx*sy/nd)*(sxy-sx*sy/nd)/((sx2-sx*sx/nd)*(sy2-sy*sy/nd))
+    m, n = (sx*sy-nd*sxy)/(sx*sx-nd*sx2), (sxy*sx-sy*sx2)/(sx*sx-nd*sx2)
+    return (r2, m, n)
+
+class TDPError(Exception):
+
+    def __init__(self, kind, **kwargs): self.kind, self.kwargs = kind, kwargs 
+
+    def __str__(self): return ('[Error] '+(errors[self.kind] % self.kwargs))
+
+class RowSorter:
+  def __init__(self, col): self.column = col
+  def key(self, item): return item[self.column-1]
+
+class DataTable(list):
+  """ DataTable represents a numeric table with columns and rows """
+
+  def __init__(self, name, columns=0, rows=0): 
+      self.dropped, self.name, self.modified = [], name, False
+      self[:] = []
+      for j in range(0, rows): self.append([0.0 for x in range(0, columns)])
+
+  def __cgetter(self): return len(self[0])
+  def __rgetter(self): return len(self)
+  def __sgetter(self): return (len(self[0]), len(self))
+  columns, rows, size = property(__cgetter), property(__rgetter), property(__sgetter)
+
+  def __setitem__(self, row, rowdata): 
+      self.modified = True
+      list.__setitem__(self, row, copy.deepcopy(rowdata))
+
+  def Transform(self, cols, rows, f):
+      try:
+         [setitem(getitem(self, j), i, f(j, i, self[j][i])) for j in rows for i in cols]
+      except IndexError: raise TDPError('outrang', type='Table indices')
+      self.modified = True
+
+  def AppendRow(self, row): 
+      if self.rows > 0 and len(row) != self.columns: raise TDPError('szmism', type='rows', val='columns')
+      self.append(copy.deepcopy(row))
+      self.modified = True
+
+  def SortRows(self, column, rev=False): 
+      self.sort(key=RowSorter(column).key, reverse=rev)
+      self.modified = True
+
+  def Resize(self, cols, rows, preserve=True):
+      if preserve: orig = copy.deepcopy(self)
+      DataTable.__init__(self, self.name, cols, rows)
+      if preserve: self.Transform(range(0, min(orig.columns, cols)), range(0, min(orig.rows, rows)), accessor(orig))
+
+  def Reshape(self, cols, rows):
+      d = []
+      if cols*rows != self.columns*self.rows: raise TDPError('szmism', type='dimensions', val='cells')
+      for j in range(self.rows):
+          for i in range(self.columns): d.append(self[j][i])
+      DataTable.__init__(self, self.name, cols, rows)
+      for j in range(rows):
+          for i in range(cols): self[j][i] = d.pop(0)
+      self.modified = True
+
+  def SubSample(self, n, start):
+      self.Filter(1, [i for i, row in enumerate(self) if (i+1) >= start and (i % n == 0)])
+
+  def Filter(self, axis, indices): 
+      if axis == 0: [setitem(self, i, [self[i][x] for x in indices]) for i in self.RowIndices()]
+      else:
+         orig, newrows = copy.deepcopy(self), [self[x] for x in indices]
+         self.Resize(orig.columns, len(newrows), False)
+         self.Transform(range(0, self.columns), self.RowIndices(), accessor(newrows))
+      self.modified = True
+
+  def RowIndices(self): return range(0, self.rows)
+
+  def DropRow(self, row): 
+      self.dropped.append(self.pop(row))
+      self.modified = True
+
+  def RestoreRow(self, i): 
+      self.AppendRow(self.dropped.pop(i))
+      self.modified = True
+
+  def Dropped(self): return self.dropped
+
+  def Transpose(self):
+      orig = copy.deepcopy(self)
+      self.Resize(self.rows, self.columns, preserve=False)
+      self.Transform(orig.RowIndices(), range(0, orig.columns), invaccessor(orig))
+
+  def Insert(self, axis, n, where):
+      if axis == 0:
+         for i, row in enumerate(self): self[i] = row[0:where]+[0.0 for x in range(0, n)]+row[where:]
+      else: self[where:where] = [ [ 0.0 for x in range(0, self.columns) ] for y in range(0, n) ]
+      self.modified = True
+
+class TableProcessor(dict):
+
+  def __init__(self, intrc=False): self.interactive = intrc
+
+  def LoadTable(self, path, tname, pipeline='', padrow=0):
+      td = DataTable(tname)
+      p = os.popen('cat %s %s' % (path, pipeline), 'r')
+      for n, line in enumerate(p):
+          row = [crdc(x) for x in line.split()]
+          if padrow > 0 and len(row) < padrow: td.AppendRow(row+[0.0 for x in range(0, padrow-len(row))])
+          else: td.AppendRow(row)
+          if self.interactive and ((n+1) % 100) == 0: stderr.write('%s: reading line %d  \n' % (tname, n+1))
+      if self.interactive and td.rows > 0: stderr.write('%s: a total of %d rows were read.\n' % (tname, td.rows))
+      self[tname] = td
+      self[tname].modified = False
+
+  def SaveTable(self, table, path=''):
+      if path == '': path = table.name
+      file(path, 'w').writelines([ cfmt(row)+'\n' for row in table ])
+      table.modified = False
+
+class VariableStack(object):
+
+  def __init__(self, it=[]): self.stack = [x for x in it]
+
+  def __iter__(self):
+      vars = set()
+      for vs in self.stack: 
+          for key in vs: vars = vars.union(vs)
+      for x in sorted(list(vars)): yield x
+
+  def __find(self, name):
+      for i in range(0, len(self.stack)):
+          if name in self.stack[-(i+1)]: return self.stack[-(i+1)]
+      raise KeyError, name
+
+  def __getitem__(self, name): return self.__find(name)[name]
+
+  def __setitem__(self, name, value):
+      if '[' in name:
+         arr, key = name[:name.find('[')], name[name.find('[')+1:-1]
+         if arr in self: self[arr][key] = value
+         else: self[arr] = { key: value }
+      else: self.stack[-1][name] = value
+
+  def __delitem__(self, name):
+      if not '[' in name: del self.__find(name)[name]
+      else: del self[name[:name.find('[')]][name[name.find('[')+1:-1]]
+
+  def iteritems(self): return [(k, self[k]) for k in self]
+ 
+  def update(self, d): updateinplace(self, d)
+
+  def get(self, name, defval):
+      try: return self[name]
+      except KeyError: return defval
+
+  def push(self, d={}): self.stack.append(dict(d))
+
+  def pop(self): self.stack.pop()
+
+class Macro:
+ 
+  def __init__(self, parent, name, args, code, docstr=''):
+      self.parent, self.name, self.args, self.code, self.docstr = parent, name, args, code, docstr
+
+  def __call__(self, **cmdargs):
+      self.parent.ExecuteScript(self.code.split('\n'), True, [(k, cfmt(v)) for k,v in cmdargs.iteritems()])
+      self.parent.commands = sorted(self.parent.grammar.keys()+self.parent.variables['alias'].keys())
+
+  def __str__(self): return '%s\ndefine %s %s\n%s\nend\n' % (self.docstr, self.name, ' '.join(self.args), self.code)
+
+class CommandInterpreter(TableProcessor):
+
+  grammar, macros, primit, vstack = {}, {}, {}, []
+
+  def __init__(self):
+      TableProcessor.__init__(self)
+      self.variables = VariableStack([{ 'sys': {'debug': False, 'interactive': False }, 'alias': {}, 'pipe': {} }])
+      for r in sre: sre[r] = re.compile(sre[r])   # compiles all regexp's in sre
+      hint = dict([ (before(' ', x), [expandenv(z).strip() for z in after(' ', x).split()]) for x in arghint])
+      def addhint(h, x): return before(':', h, True)+x+after('=', h, True)+ift(h.endswith('...'), '...', '')
+      for c in [ x.replace('cmd_', '') for x in dir(self) if x.startswith('cmd_')]:
+          self.primit[c] = self.__getattribute__('cmd_'+c)
+          cod = self.primit[c].im_func.func_code
+          args = cod.co_varnames[1:cod.co_argcount]
+          self.grammar[c] = [ addhint(hint[c][i], x) for i, x in enumerate(args) ]
+      self.commands = self.grammar.keys()+self.variables['alias'].keys()
+
+  def InternalCompleter(self, text, state):
+      sflag, pos = False, 0
+      lbuf = readline.get_line_buffer().lstrip()
+      if ';' in lbuf: lbuf = lbuf[lbuf.rfind(';')+1:].lstrip()
+      for s in lbuf:
+          if (s in string.whitespace) and (sflag == True): 
+             pos += 1
+             sflag = False
+          elif (s not in string.whitespace) and (sflag == False): sflag = True
+      if pos == 0: return complete_result(text, state, self.commands)
+      lword, cmd = lbuf[lbuf.rfind(' ')+1:], lbuf.split()[0].strip()
+      mode, kwargs = self.grammar[cmd][pos-1], [argname(x)+'=' for x in self.grammar[cmd][pos-1:]]
+      if lword.startswith('$'): return complete_result(text, state, self.variables)
+      if '|' in mode: return complete_result(text, state, mode.split('=')[1].split('|'))
+      if before(':', mode) in self.comphints: return complete_result(text, state, self.comphints[before(':', mode)])
+
+  def ProtectBetween(self, line, delim, subst, cc, f):
+      while delim in line:                                                   
+            (p, q) = findbetween(line, delim, delim)
+            if p >= 0 and q == -1: raise TDPError('synerr', msg='Missing closing delimiter, '+delim)
+            subst["%%%d" % cc] = f(line[p+len(delim):q])
+            line = line.replace(delim+line[p+len(delim):q]+delim, "%%%d" % cc)
+            cc += 1
+      return (line, cc)
+
+  def ExpandArguments(self, line):
+      subst, cc = {}, 0
+      (line, cc) = self.ProtectBetween(line, '\"', subst, cc, same)
+      (line, cc) = self.ProtectBetween(line, '\'', subst, cc, self.ExpandVariables)
+      # protects the = sign inside quotes so the parser won't screw up
+      for k in subst:
+          if '=' in subst[k]: subst[k] = subst[k].replace('=', '\\#')
+      #
+      line = self.ExpandVariables(expandenv(line))
+      while True:
+            origline = line
+            line = sre['mathexpand'].sub(lambda x: str(self.EvaluateArithmetic(x.group(2))), line)
+            m = sre['cmdexpand'].search(line)
+            if m:
+               try: line = sre['cmdexpand'].sub(lambda x: self.SubstituteCommandOutput(x.group(2)), line)
+               except: 
+                    subst['%%%d' % cc] = m.group(1) 
+                    line = line.replace(m.group(1), ' %%%d ' % cc)
+                    cc += 1
+            if origline == line: break 
+      return [replaceall(subst, x) for x in line.strip().split()]
+
+  def ConvertArgument(self, v, t, ismacro):
+      cond = { 'm': lambda x: x in self.macros, 's': lambda x: isinstance(x, str), 'b': lambda x: str(x).lower() in ('true','false'),
+               't': lambda x: x in self, 'i': lambda x: isinstance(x, int), 'a': lambda x: str(x).lower() in ('columns', 'rows'), 
+               'r': lambda x: (x == '*' or isinstance(x, (int,tuple))), 'n': lambda x: isinstance(x, float) }
+      transf = { 'm': self.macros.get, 's': str, 'v': str, 't': lambda x: ift(ismacro, x, self[x]), '': same, 'n': float,
+                 'i': int, 'a': lambda x: ift(x == 'columns', 0, 1), 'r': lambda x: ift(x == '*', (-1, -1), ift(isinstance(x, int), (x,x), x)) }
+      if t in cond and not cond[t](v): raise TDPError('invarg', type=argtype[t], val=v)
+      return transf.get(t, same)(v)
+  
+  def ParseKeywordArgs(self, head, posargs, gram):
+      def ReplaceEqualHack(z):
+          if type(z) == str and '\\#' in z: return z.replace('\\#', '=')
+          return z
+      expargs, ismacro = len(gram), head in self.macros
+      isvariadic = expargs > 0 and gram[-1].endswith('...')
+      if expargs == 0: return {}
+      if not isvariadic and len(posargs) > expargs:
+         raise TDPError('tooarg', cmd=head, args=fmtjoin(sfmt, gram))
+      kwords, cmdargs, oposargs = [argname(x).replace('...', '') for x in gram], {}, posargs[:]
+      for kwp in [str(t).split('=') for t in gram+posargs if '=' in str(t)]:
+          if argname(kwp[0]) in kwords:
+             cmdargs[argname(kwp[0])] = crdc(ReplaceEqualHack(kwp[1]))
+             if '%s=%s' % (kwp[0], kwp[1]) in posargs: posargs.remove('%s=%s' % (kwp[0], kwp[1]))
+      for i, arg in enumerate(posargs): 
+          if i < expargs and not gram[i].endswith('...'): cmdargs[argname(gram[i])] = ReplaceEqualHack(arg)
+      mis = [t for t in gram if argname(t) not in cmdargs and not t.endswith('...')]
+      if len(mis) > 0: raise TDPError('misarg', cmd=head, arg=argname(mis[0]), args=fmtjoin(sfmt, gram))
+      newargs = [argname(x) for x in gram if not x.endswith('...')]
+      varargs = [after('=', cfmt(arg), defv=ReplaceEqualHack(arg)) for i, arg in enumerate(oposargs) if i >= len(newargs)]
+      if isvariadic: cmdargs[gram[-1].replace('...', '')] = varargs
+      if self.variables['sys']['debug']:
+         stderr.write(('-> %s '%head)+fmtjoin(lambda x: '%s=%s' % (x,cmdargs[x]), cmdargs)+'\n')
+      for i, arg in enumerate([cmdargs[x] for x in newargs]):
+          if i >= expargs: continue
+          argt = before(':', gram[i])
+          if head in ('eval', 'celleval') and argt == 'e': continue
+          if '|' in gram[i]:
+              posskw = gram[i].split('=')[1].split('|')
+              if arg not in posskw: raise TDPError('invarg', type='one of { %s }' % ''.join(['\''+x+'\',' for x in posskw])[:-1], val=arg)
+          cmdargs[argname(gram[i])] = self.ConvertArgument(arg, argt, ismacro)
+      return cmdargs
+ 
+  def ExecuteCommand(self, line):
+      cmd = [crdc(x) for x in self.ExpandArguments(line)]
+      if len(cmd) == 0: return
+      m = sre['splcmd'].match(cmd[0])
+      if m: 
+         cmd = [crdc(x) for x in self.ExpandArguments(' '.join([ m.group(2), m.group(3) ] + cmd[1:]))]
+      if cmd[0] in self.variables['alias']: cmd[0] = self.variables['alias'][cmd[0]]
+      if cmd[0] not in self.commands: raise TDPError('unkcmd', cmd=cmd[0])
+      cmdargs = self.ParseKeywordArgs(cmd[0], cmd[1:], self.grammar[cmd[0]])
+      if cmd[0] in self.primit: self.primit[cmd[0]](**cmdargs)
+      else: self.macros[cmd[0]](**cmdargs) 
+
+  def EvaluateArithmetic(self, expr): 
+      if ' if ' in expr: 
+         cond = eval(expr[expr.find('if ')+2:expr.find('else ')])
+         if cond: return self.EvaluateArithmetic(expr[:expr.find('if ')])
+         else: return self.EvaluateArithmetic(expr[expr.find('else ')+4:])
+      try: return eval(expr)
+      except: return expr
+
+  def SubstituteCommandOutput(self, expr): 
+      self.ExecuteScript(expr.split(';'))
+      try: return cfmt(self.vstack.pop(0))
+      except: return ''
+  
+  def ExpandVariables(self, expr):
+      ex = sre['arrayexpand'].sub(lambda x: cfmt(self.variables.get(x.group(2), '$'+x.group(2))[x.group(3)]).strip(), str(expr))
+      ex = sre['varexpand'].sub(lambda x: cfmt(self.variables.get(x.group(2), '$'+x.group(2))).strip(), ex)
+      ex = sre['tblarrayexpand'].sub(lambda x: cfmt(self.variables[''][x.group(2)]), ex)
+      return cfmt(ex).strip()
+
+  def ShowVariables(self): stdout.writelines([k+' = '+cfmt(v, True)+'\n' for k, v in self.variables.iteritems()])
+
+  def Return(self, value): self.vstack.insert(0, value)
+
+  def ComputeFFT(self, function, data, newtable, mode='real', result='magnitude', norm=True):
+      try: import numpy
+      except: raise TDPError('nocapa', msg='FFT needs the NumPy module in Python')
+      fftdata = eval('numpy.fft.'+function)(numpy.array(data))
+      self[newtable] = newt = DataTable(newtable, ift(result=='components', 3, 2), len(fftdata))
+      newt.Transform([0], newt.RowIndices(), lambda j, i, v: j)
+      normval = ift(norm, float(len(fftdata)-1), 1.0)
+      if result=='magnitude': newt.Transform([1], newt.RowIndices(), lambda j, i, v: abs(fftdata[j])/normval)
+      else:
+         newt.Transform([1], newt.RowIndices(), lambda j, i, v: fftdata[j].real/normval)
+         newt.Transform([2], newt.RowIndices(), lambda j, i, v: fftdata[j].imag/normval)
+
+  def FitTable(self, table, col1, col2, fit, interac=True):
+      rowsrange = table.RowIndices()
+      x, y = [float(table[j][col1-1]) for j in rowsrange], [float(table[j][col2-1]) for j in rowsrange]
+      xy, ndata, fits = zip(x, y), len(x), fitdata.keys()
+      xbad, ybad = any([q <= 0.0 for q in x]), any([q <= 0.0 for q in y])
+      sd = { 'x': x, 'y': y, 'x2': [z**2 for z in x], 'y2': [z**2 for z in y], 'xy': [z[0]*z[1] for z in xy] }
+      if not xbad: sd['lnx'], sd['lnx2'], sd['ylnx'] = [log(z) for z in x], [log(z)**2 for z in x], [z[1]*log(z[0]) for z in xy]
+      if not ybad:
+         sd['lny'], sd['lny2'], sd['xlny'] = [log(z) for z in y], [log(z)**2 for z in y], [z[0]*log(z[1]) for z in xy]
+         sd['x2lny'] = [(z[0]**2)*log(z[1]) for z in xy]
+      if not xbad and not ybad: sd['lnxlny'] = [log(z[0])*log(z[1]) for z in xy]
+      for k in sd.keys(): sd['sum'+k] = sum(sd[k])
+      if xbad: fits = [x for x in fits if x not in ('log', 'powers')]
+      if ybad: fits = [x for x in fits if x not in ('exp', 'powers')]
+      if fit in fits:
+         r2, m, n = LinearRegression(*([ndata]+[sd['sum'+x] for x in fitdata[fit][0].split(',')]))
+         if interac: stdout.write((("-> R="+floatformat) % sqrt(r2))+(" : "+fitdata[fit][1](m, n))+'\n')
+         else: return (r2,  fitdata[fit][1](m, n))
+      else:
+         if interac: raise TDPError('invfit', type=fit, x=col1, y=col2) 
+         else: return (-1, '')
+
+  def Jacobian(self, funcs, beta, dx):
+      try: import numpy
+      except: raise TDPError('nocapa', msg='non-linear fitting needs the NumPy module in Python')
+      J = numpy.zeros((len(funcs), len(beta)))
+      for j, f in enumerate(funcs):
+          for i, b in enumerate(beta):
+              h = ift(fabs(b) < 1.0E-15, dx*(1.0E-06), dx*b)
+              betap = [ift(k == i, z+h, z) for k, z in enumerate(beta)]
+              J[j,i] = (f(betap)-f(beta))/h
+      return numpy.mat(J)
+
+  def RowEval(self, expr, row, j):
+      self.variables.push(dict([('0', j+1)]+[(str(i+1), r) for i, r in enumerate(row)]))
+      ans = self.EvaluateArithmetic(''.join(self.ExpandArguments(expr)))
+      self.variables.pop()
+      return ans
+
+  def ReadIndentedBlock(self, blockname, code):
+      block, docstr, indlev = '', '', 0
+      for line in [x.strip() for x in code if not ignorable(x)]:
+          code.pop(0)
+          if line.startswith('\"'): docstr += (line[1:-1]+'\n')
+          elif line == 'end' and indlev == 0: return (block.strip('\n'), docstr)
+          elif line == 'end' and indlev > 0: block, indlev = block+line+'\n', indlev-1
+          else: block, indlev = block+line+'\n', indlev+ift(line.split()[0] in indentable, 1, 0)
+      raise TDPError('synerr', msg='Block \"%s\" is not properly closed with end' % blockname)
+
+  def SplitIfElse(self, lines):
+      indlev = 0
+      for i, line in enumerate(lines):
+          if line.split()[0] in indentable: indlev += 1
+          if line.split()[0] == 'end': indlev -= 1
+          if line.split()[0] == 'else' and indlev == 0: return (lines[:i], lines[i+1:])
+      return (lines, [])
+
+  def ExecuteScript(self, lines, localvars=True, extravars=[], showret=False):
+      code = copy.deepcopy(lines)
+      if localvars: self.variables.push()
+      for pair in extravars: self.variables[pair[0]] = crdc(pair[1])
+      while len(code) > 0:
+          line = code.pop(0).strip()
+          if ignorable(line): continue
+          lspl = tokenlist(line)
+          if lspl[0] == 'define':
+             (macro_code, docstr) = self.ReadIndentedBlock('define', code)
+             self.cmd_define(lspl[1], docstr, ','.join(lspl[2:]), macro_code)
+          elif lspl[0] == 'if':
+             condition = crdc(self.ExpandArguments(line)[1])
+             (if_code, docstr) = self.ReadIndentedBlock('if', code)
+             (if_subcode, else_subcode) = self.SplitIfElse(if_code.split('\n'))
+             if condition: self.ExecuteScript(if_subcode)
+             else: self.ExecuteScript(else_subcode)
+          elif lspl[0] == 'while':
+             condline = line
+             (while_code, docstr) = self.ReadIndentedBlock('while', code)
+             while True:
+                   condition = crdc(self.ExpandArguments(condline)[1]) 
+                   try:
+                     if not condition: break
+                     else: self.ExecuteScript(while_code.split('\n')) 
+                   except StopIteration: break
+          elif lspl[0] == 'for':
+             v, args, step = lspl[1], [crdc(x) for x in self.ExpandArguments(line)[2:]], 1
+             (for_code, docstr) = self.ReadIndentedBlock('for', code)
+             if len(args) > 2: step = args[2]
+             vi = args[0]
+             self.variables.push()
+             while vi <= args[1]: 
+                   try: self.ExecuteScript(for_code.split('\n'), extravars=((v, vi)))
+                   except StopIteration: break
+                   vi += step
+             self.variables.pop()
+          elif lspl[0] == 'break': raise StopIteration
+          elif lspl[0] == 'return': self.Return(crdc(''.join(self.ExpandArguments(' '.join(lspl[1:])))))
+          elif lspl[0] == 'include': self.ExecuteScript(file(os.path.expanduser(''.join(lspl[1:]))).readlines())
+          else: self.ExecuteCommand(line)
+      if localvars: self.variables.pop()
+      if showret and len(self.vstack) > 0: stdout.write(cfmt(self.vstack.pop(0))+'\n')
+
+  def MainLoop(self):
+      self.variables.push()
+      self.variables['sys']['interactive'] = True
+      self.comphints = {'t': self, 'c': self.commands, 'v': self.variables, 
+                        'm': self.macros, 'b': ('true', 'false'), 'a': ('columns', 'rows')}
+      while self.variables['sys']['interactive']:
+          try:
+            self.comphints['f'] = os.listdir('.')
+            line = raw_input(self.variables['prompt']).strip()
+            ans = [ self.ExecuteCommand(s) for s in line.split(';') if s != '']
+          except EOFError: 
+                 stdout.write('\n') 
+                 self.variables['sys']['interactive'] = False
+                 break
+          except TDPError, e: stdout.write(str(e)+'\n')
+          except EnvironmentError, e: stdout.write('[System Error] '+str(e)+'\n')
+          except KeyboardInterrupt: stdout.write("\nInterrupted!\n")
+          if len(self.vstack) > 0 and self.variables['sys']['interactive']: stdout.write(' -> '+cfmt(self.vstack.pop(0))+'\n')
+      self.variables.pop()
+      ans = 'z'
+      for t in self.keys():
+          if self[t].modified:
+             if ans.lower() not in ('a', 'x'):
+                stdout.write('Table \"%s\" was modified. Do you want to save it?\n' % t)
+                ans = raw_input('(Y: yes | N: no | C: cancel exit | X: don\'t save any | A: save all):  ')
+             if ans.lower() == 'c': 
+                self.variables['sys']['interactive'] = True
+                break
+             if ans.lower() in ('y', 'a'): 
+                self.SaveTable(self[t])
+                stdout.write('Table \"%s\" was saved.\n' % t)
+      if ans.lower() != 'c':
+         stdout.write('\nThanks for using %s!\n' % pName)
+
+  def cmd_unset(self, variable):
+      """Unsets a variable."""
+      try: del self.variables[variable]
+      except: raise TDPError('unkvar', var=variable)
+           
+  def cmd_load(self, file, table, pipes, padrow=0):
+      """Loads a table from a file, using the given pipes to filter the source."""
+      pipes = pipes.split(',')
+      for p in pipes:
+          if p not in self.variables['pipe']: raise TDPError('unkpip', pipe=p)
+      pipes = ' | '+ fmtjoin(self.variables['pipe'].get, pipes, ' | ')
+      pipes = self.ExpandVariables(pipes)
+      if table == '.default.': TableProcessor.LoadTable(self, file, os.path.basename(file), pipes, padrow)
+      else: TableProcessor.LoadTable(self, file, table, pipes, padrow)
+
+  def cmd_pipes(self):
+      """Shows the names of all the pipes enabled for the \'load\' command."""
+      for k in sorted(self.variables['pipe']): stdout.write('%s -> \"%s\"\n' % (k.ljust(20), self.variables['pipe'][k]))
+
+  def cmd_tables(self):
+      """Shows the names of the tables in memory."""
+      keys = sorted(self.keys())
+      if len(keys) > 0:
+         stdout.write('The following tables exist: \n')
+         modif = (lambda x: ift(x.modified, ', modified', ''))
+         stdout.writelines(['  %s (%d columns, %d rows%s)\n' % (k, self[k].columns, self[k].rows, modif(self[k])) for k in keys])
+      else: stdout.write('No tables exist\n')
+
+  def cmd_dropped(self, table):
+      """Print all 'dropped' points in a table."""
+      dr = table.Dropped()
+      if len(dr) > 0:
+         stdout.write("%s dropped point(s): \n" % len(dr))
+         for j in range(0, len(dr)): stdout.write(('[%d D]: ' % (j+1))+cfmt(dr[j])+'\n')
+      else: stdout.write("The table doesn't have any dropped points.\n")
+
+  def cmd_print(self, table, fromrow=1, torow=-1):
+      """Print rows from a table."""
+      ls = 2+int(log10(table.rows))
+      if fromrow < 0: fromrow += table.rows
+      if torow < 0: torow += (table.rows+1)
+      if self.variables['sys']['interactive']:
+         stdout.write(' '.ljust(ls)+'       ')
+         for i in range(table.columns): stdout.write(('[  %d  ]' % (i+1)).center(12)+'  ')
+         stdout.write('\n---------')
+         for i in range(table.columns): stdout.write('--------------')
+         stdout.write('\n')
+      for j in range(fromrow-1, torow):
+          if (j+1) <= 0: continue
+          prefix=ift(self.variables['sys']['interactive'], '[ %s] | ' % str(j+1).ljust(ls), '')
+          try: stdout.write(prefix+cfmt(table[j])+'\n')
+          except: break
+
+  def cmd_join(self, axis, table1, table2):
+      """Joins two tables by columns or rows, saving the result into the first table."""
+      if axis == 0:
+         if table1.rows != table2.rows: raise TDPError('szmism', type='tables', val='rows')
+         for j, row_a in enumerate(table1): row_a += table2[j]
+      else:
+         if table1.columns != table2.columns: raise TDPError('szmism', type='tables', val='columns')
+         for row in table2: table1.AppendRow(row)
+
+  def cmd_save(self, table, path): 
+      """Saves a table into a file."""
+      self.SaveTable(table, path)
+
+  def cmd_write(self, values=[]):
+      """Displays the given value(s) to the screen."""
+      stdout.write(fmtjoin(str,values)+'\n')
+
+  def cmd_shell(self, command, args=[]): 
+      """Executes an external shell command."""
+      os.system(command+' '+''.join(args))
+
+  def cmd_size(self, axis, table):
+      """Returns the size of the given axis for a table."""
+      self.Return(table.size[axis])
+
+  def cmd_cell(self, table, column, row): 
+      """Returns the value at the given cell."""
+      self.Return(table[row-1 % len(table)][column-1 % len(table[0])])
+
+  def cmd_transpose(self, table):
+      """Transposes a table, interchanging columns and rows."""
+      table.Transpose()
+
+  def cmd_resize(self, table, columns, rows):
+      """Resizes a table to the specified number of columns and rows, probably expanding or shrinking it"""
+      table.Resize(columns, rows)
+
+  def cmd_reshape(self, table, columns, rows):
+      """Changes the dimensions of a table, conserving the total number of cells"""
+      table.Reshape(columns, rows)
+
+  def cmd_new(self, table, columns, rows): 
+      """Creates a new table with the given number of columns and rows."""
+      self[table] = DataTable(table, columns, rows)
+
+  def cmd_delete(self, table): 
+      """Deletes (irreversibily) a given table from memory."""
+      del self[table.name]
+
+  def cmd_drop(self, table, row): 
+      """Drop a row from a table."""
+      table.DropRow(row-1) 
+
+  def cmd_restore(self, table, dropped): 
+      """Restores a dropped row from a table."""
+      table.RestoreRow(dropped-1)
+
+  def cmd_subsample(self, table, n, start):
+      """Preserves one row every n from a table."""
+      table.SubSample(n, start)
+
+  def cmd_sort(self, table, column, order): 
+      """Sorts the rows in a table using the values of a certain column."""
+      table.SortRows(column, order == 'descending')
+
+  def cmd_define(self, name, docstr, args, code):
+      """Defines a new macro."""
+      self.macros[name] = Macro(self, name, ift(args == '', [], args.split(',')), code, docstr)
+      if name not in self.grammar: self.grammar[name] = self.macros[name].args 
+      if name not in self.commands: self.commands.append(name)
+      self.commands.sort()
+
+  def cmd_inspect(self, macro):
+      """Shows the source code of a macro."""
+      stdout.write(str(macro))
+
+  def cmd_reduce(self, function, table, column): 
+      """Reduces the values in a column using the given operation."""
+      try: self.Return(eval(function)([row[column-1] for row in table]))
+      except IndexError: raise TDPError('outrang', type='Column index')
+      except ZeroDivisionError: raise TDPError('generr', msg='More than a single value is needed to perform \'%s\'' % function)
+
+  def cmd_running(self, function, table, xcolumn, ycolumn, length, newtable):
+      """Computes the running operation on a pair of columns and saves it into a new table."""
+      xcol, ycol = [row[xcolumn-1] for row in table], [row[ycolumn-1] for row in table]
+      runxcol = [average([xcol[i+j] for j in range(0,length)]) for i in range(0, len(xcol)-length)]
+      runycol = [eval(function)([ycol[i+j] for j in range(0,length)]) for i in range(0, len(ycol)-length)]
+      self[newtable] = newt = DataTable(newtable, 2, len(runxcol))
+      newt.Transform([0], newt.RowIndices(), lambda j, i, v: runxcol[j])
+      newt.Transform([1], newt.RowIndices(), lambda j, i, v: runycol[j]) 
+
+  def cmd_view(self, table): 
+      """Views a table using an external viewer/pager utility."""
+      os.popen(self.variables['pager'], 'w').writelines([cfmt(z)+'\n' for z in table])
+
+  def cmd_set(self, variable='*', expr=None):
+      """Sets the value of a variable, or, without arguments, shows all variables."""
+      if variable == '*': self.ShowVariables() 
+      else: self.variables[variable] = expr
+
+  def cmd_plot(self, table, xcolumn, ycolumn, options=[]):
+      """Plots two columns of a table in gnuplot."""
+      if table.columns < 2: xcolumn, ycolumn = (0, 1)
+      p = os.popen("gnuplot -persist", 'w')
+      p.write("plot \'-\' %s\n" % ' '.join(options))
+      for i, row in enumerate(table): 
+          p.write(cfmt(ift(xcolumn > 0, row[xcolumn-1], i))+'  '+cfmt(row[ycolumn-1])+'\n')
+      p.write('e\n')
+
+  def cmd_fit(self, mode, table, xcolumn, ycolumn):
+      """Performs linear regression on two columns from a table."""
+      if mode == 'best':
+         br2, beq = 0.0, ''
+         for fit in fitdata:
+             (r2, eq) = self.FitTable(table, xcolumn, ycolumn, fit, False)
+             if r2 > br2: br2, beq = r2, eq
+         stdout.write((("-> R="+floatformat) % sqrt(br2))+" : "+beq+'\n')
+      else: self.FitTable(table, xcolumn, ycolumn, mode)
+
+  def cmd_nonlinfit(self, table, xcolumn, ycolumn, expr, vars, tol=1.0E-3, niter=100):
+      """Performs non-linear curve fitting on two columns from a table."""
+      xdata, ydata = [r[xcolumn-1] for r in table], [r[ycolumn-1] for r in table]
+      vars = [z.split('=') for z in vars.split(',')]
+      f = eval('lambda x,%s: %s' % (','.join([z[0] for z in vars]), expr))
+      def partialf(xi): return (lambda b: f(*([xi]+b)))
+      def res(x, y, beta): return [(yi-partialf(xi)(beta)) for xi, yi in zip(x, y)]
+      beta, cc = [float(z[1]) for z in vars], 0
+      try: import numpy
+      except: raise TDPError('nocapa', msg='non-linear fitting needs the NumPy module in Python')
+      if self.variables['sys']['interactive']: 
+         stdout.write('Performing non-linear fit, this might take a long time...\n')
+      try:
+         ds = tol+1.0
+         while cc < niter and ds >= tol:
+               J = self.Jacobian([partialf(xi) for xi in xdata], beta, 0.001)
+               dbeta = ((J.T*J).I)*(J.T)*numpy.mat(res(xdata, ydata, beta)).T
+               dbt = [ float(dbeta[j]) for j in range(dbeta.size) ]
+               ds = sqrt(sum([z**2 for z in dbt]))
+               if ds > 1.0: dbeta = [ x/sqrt(sum([z**2 for z in dbt])) for x in dbt ]
+               else: dbeta = dbt
+               beta, cc = [(b+db) for b, db in zip(beta, dbeta)], cc + 1
+         ycomp = [ f(*([x]+beta)) for x in xdata ]
+         p1, p2, s1, s2 = average(ydata), average(ycomp), deviation(ydata), deviation(ycomp)
+         R = (1.0/float(len(ydata)))*sum([(x-p1)*(y-p2)/(s1*s2) for x, y in zip(ydata, ycomp)])
+         for i, b in enumerate(beta): stdout.write('%s = %8.8f\n' % (vars[i][0], b))
+         stdout.write('R = %8.8f\n' % R) 
+
+      except Exception, e: 
+         print e
+         raise TDPError('generr', msg='Non-linear fitting failed to converge. Please check your initial parameters and/or tolerance.') 
+
+  def cmd_correlate(self, table1, column1, table2, column2):
+      """Computes the Pearson correlation between two columns, possible on two different tables."""
+      col1, col2 = [row[column1-1] for row in table1], [row[column2-1] for row in table2]
+      if len(col1) != len(col2): raise TDPError('szmism', type='columns', val='rows')
+      p1, p2, s1, s2 = average(col1), average(col2), deviation(col1), deviation(col2)
+      self.Return((1.0/float(len(col1)))*sum([(x-p1)*(y-p2)/(s1*s2) for x, y in zip(col1, col2)]))
+
+  def cmd_interpolate(self, method, table, intpoints):
+      """Interpolates between the points of a table."""
+      N = len(table)
+      if method == 'linear':
+         j = 1
+         v0 = [0.0 for z in range(table.columns)]
+         v1 = [0.0 for z in range(table.columns)]
+         for i in range(len(table)-1):
+             table.Insert(1, intpoints, j)
+             first, last = j, j+intpoints
+             for col in range(table.columns): 
+                 v0[col], v1[col] = table[first-1][col], table[last][col]
+             for k in range(intpoints):
+                 for col in range(table.columns):
+                     table[first+k][col] = ((k+1)/float(intpoints+2))*v1[col]+((intpoints-k+1)/float(intpoints+2))*v0[col]
+             j = last+1
+      elif method == 'spline':
+         try: import numpy
+         except: raise TDPError('nocapa', msg='Spline interpolation needs the NumPy module in Python')
+         A = numpy.zeros((N-2, N-2))
+         x = numpy.zeros((N-2, 1))
+         for i in range(N-2):
+             A[i][i] = 4
+             if i < N-3: 
+                A[i][i+1] = 1
+                A[i+1][i] = 1
+         print A
+
+  def cmd_realfft(self, table, column, newtable, result='magnitude', inverse=False, normalize=True):
+      """Computes the real Fast Fourier Transform (FFT) of the selected column into a new table."""
+      self.ComputeFFT(ift(inverse, 'irfft', 'rfft'), [row[column-1] for row in table], newtable, 'real', result, normalize)
+
+  def cmd_complexfft(self, table, realcolumn, imagcolumn, newtable, result='magnitude', inverse=False, normalize=True):
+      """Computes the complex Fast Fourier Transform (FFT) into a new table, using two columns for real and imaginary parts."""
+      self.ComputeFFT(ift(inverse, 'ifft', 'fft'), [complex(r[realcolumn-1],r[imagcolumn-1]) for r in table], newtable, 'complex', result, normalize)
+
+  def cmd_findzero(self, table, xcolumn, ycolumn):
+      """Takes two columns from a table as X and Y, and interpolates the first X value where Y crosses zero, if any."""
+      x0, y0 = None, None
+      sign = lambda x: ift(x > 0.0, 1, -1)
+      for i, row in enumerate(table):
+          x, y = row[xcolumn-1], row[ycolumn-1]
+          if y0 != None and sign(y) != sign(y0):
+             self.Return(x0+(x-x0)*(-y0)/(y-y0))
+             return
+          x0, y0 = x, y
+      raise TDPError('generr', msg='Column %d does not cross zero' % ycolumn)
+
+  def cmd_findabsmax(self, table, xcolumn, ycolumn):
+      """Finds the X value corresponding to the maximum value of Y"""
+      row0 = table[0]
+      xmax, ymax = row0[xcolumn-1], row0[ycolumn-1]
+      for i, row in enumerate(table):
+          x, y = row[xcolumn-1], row[ycolumn-1]
+          if y > ymax: ymax, xmax = y, x
+      self.Return(xmax)
+      return
+
+  def cmd_histogram(self, table, column, bins, newtable, start, end):
+      """Computes an histogram of values from a column and saves it into a new table."""
+      newt, coldata = DataTable(newtable, 2, bins), [row[column-1] for row in table]
+      if start == '.default.': start = min(coldata)
+      if end == '.default.': end = max(coldata)
+      dx = float(end-start)/bins
+      ccol = copy.deepcopy([int(floor((bins-1)*(row[column-1]-start)/float(end-start))) for row in table])
+      newt.Transform([0], newt.RowIndices(), lambda j, i, v: (j+1))
+      newt.Transform([1], newt.RowIndices(), lambda j, i, v: sum([1 for x in ccol if x == j]))
+      newt.Transform([0], newt.RowIndices(), lambda j, i, v: start+j*dx)
+      self[newtable] = newt
+
+  def cmd_unitconvert(self, table, column, fromunit, tounit):
+      """Converts the values of a column in a table from one unit to another."""
+      conv = os.popen('units \"1 %s\" \"%s\"' % (fromunit, tounit), 'r').readline().strip()
+      if conv.startswith('Unknown unit '): raise TDPError('unkunit', unit=conv)
+      if conv.startswith('conformability error'): raise TDPError('unitmism',u1=fromunit,u2=tounit)
+      self.cmd_eval(table, '$'+str(column)+'=$'+str(column)+conv)
+ 
+  def cmd_eval(self, table, expr):
+      """Applies an arbitrary transformation to the values in a column."""
+      if '=' not in expr or not expr.startswith('$'): raise TDPError('evlerr', expr=expr, type='assignment expression')
+      lhs, rhs = tokenlist(expr, '=')
+      try: colnum = int(lhs[1:])
+      except: raise TDPError('evlerr', expr=lhs, type='column variable')
+      for j, row in enumerate(table): row[colnum-1] = self.RowEval(rhs, row, j)
+      table.modified = True
+
+  def cmd_celleval(self, table, expr, rangecols, rangerows, inplace=False):
+      """Applies an arbitrary transformation to the cells in a range of columns and rows."""
+      replist = []
+      self.variables.push()
+      for ii in expandrange(rangecols, table.columns):
+          for jj in expandrange(rangerows, table.rows):
+              self.variables.update({'i': ii+1, 'j': jj+1, 'v': table[jj][ii]})
+              texpr = ''.join(self.ExpandArguments(str(expr)))
+              while '[' in texpr:
+                    x, y = texpr.find('['), texpr.find(']')
+                    cellexpr = [int(self.EvaluateArithmetic(q)) for q in texpr[x+1:y].split(',')]
+                    cellexpr = table[cellexpr[1]-1][cellexpr[0]-1]
+                    texpr = texpr.replace(texpr[x:y+1], str(cellexpr))
+              if inplace: table[jj][ii] = self.EvaluateArithmetic(texpr)
+              else: replist.append((ii, jj, self.EvaluateArithmetic(texpr)))
+      self.variables.pop()
+      if not inplace: 
+         for rp in replist: table[rp[1]][rp[0]] = rp[2]
+      table.modified = True
+
+  def cmd_remove(self, axis, table, range):
+      """Removes a range of columns or rows from a table."""
+      table.Filter(axis, expandrange(range, table.size[axis], invert=True))
+
+  def cmd_insert(self, axis, table, number, where):
+      """Inserts a number of columns or rows into a table."""
+      if where == -1: where = table.size[axis]
+      table.Insert(axis, number, where)
+
+  def cmd_crop(self, table, rangecols, rangerows):
+      """Crops a table in place, only preserving the cells in the given range(s)."""
+      for axis in range(2): table.Filter(axis, expandrange((rangecols, rangerows)[axis], table.size[axis]))
+
+  def cmd_arrange(self, axis, table, order):
+      """Arrange the order of rows/columns arbitrarily."""
+      orderspl = [int(x) for x in order.split(',')]
+      orig = copy.deepcopy(table)
+      for i in range(table.size[axis]):
+          if orderspl[i] != i+1:
+             table.modified = True
+             for j in range(table.size[1-axis]):
+                 if axis == 0: table[j][i] = orig[j][orderspl[i]-1] 
+                 else: table[i][j] = orig[orderspl[i]-1][j] 
+
+  def cmd_copy(self, orig, dest, rangecols, rangerows):
+      """Copy a table (or a part of it) into a new table."""
+      rc, rr = expandrange(rangecols, orig.columns), expandrange(rangerows, orig.rows)
+      self.ExecuteCommand('new %s %d %d' % (dest, len(rc), len(rr)))
+      self[dest].Transform(range(0, len(rc)), range(0, len(rr)), lambda i, j, v: orig[i+rr[0]][j+rc[0]])
+
+  def cmd_split(self, axis, table, number, pattern):
+      """Splits a table by rows/columns into several tables."""
+      if number == 0: raise TDPError('outrang', type='Size for split')
+      ntables = table.size[axis] / number
+      if table.size[axis] % number != 0: ntables += 1
+      if pattern == '.default.':
+         if '.' in table.name:
+            spl = table.name.split('.')
+            pattern = spl[0]+'-%d.'+spl[1]
+         else: pattern = table.name+'-%d'
+      for i in range(ntables):
+          name, startv, endv = pattern % (i+1), i*number+1, (i+1)*number
+          if i == ntables-1 and endv > table.size[axis]: endv = table.size[axis]
+          if axis == 0: self.cmd_copy(table, name, (startv, endv), (1, table.size[1-axis]))
+          else: self.cmd_copy(table, name, (1, table.size[1-axis]), (startv, endv))
+
+  def cmd_filter(self, table, expr):
+      """Filter the rows of a table, according to a certain expression."""
+      table.Filter(1, [i for i, row in enumerate(table) if self.RowEval(expr, row, i)])
+
+  def cmd_history(self, keyword='*'):
+      """Searches for a given keyword through the command history."""
+      for i in range(readline.get_current_history_length()):
+          h = readline.get_history_item(i+1)
+          if keyword == '*': stdout.write(str(i+1).ljust(10)+str(h)+'\n')
+          elif keyword.lower() in h.lower(): stdout.write(str(i+1).ljust(10)+str(h)+'\n')
+
+  def cmd_repeat(self, number):
+      """Repeats the specified command from history."""
+      try: 
+        h = readline.get_history_item(number)
+        ans = [ self.ExecuteCommand(s) for s in h.split(';') if s != '']
+      except: raise TDPError('unkcmd', cmd='@'+str(number))
+
+  def cmd_function(self, name, args, expr):
+      """Defines a new mathematical function."""
+      try:
+          s = eval(name)
+          raise TDPError('generr', '%s is not a valid name for a new function' % name)
+      except NameError:
+          defun = 'def %s (%s): return (%s)' % (name, args, expr)
+          exec defun
+          globals()[name] = eval(name)
+
+  def cmd_help(self, command='*'):
+      """Shows help about commands."""
+      if command == '*': return stdout.write('Available commands: \n\n'+'\n'.join(textwrap.wrap('\n'.join(self.commands)))+'\n\n')
+      elif command not in self.commands: raise TDPError('unkcmd', cmd=command)
+      elif command in self.variables['alias']:
+           stdout.write('\'%s\' is an alias for \'%s\'\n' % (command, self.variables['alias'][command]))
+           return self.cmd_help(self.variables['alias'][command])
+      stdout.write('Usage of \'%s\' (<> are required arguments, [] are optional):\n\n' % command)
+      stdout.write(command+'  '+fmtjoin(sfmt, self.grammar[command], ' ')+'\n\n')
+      docstr = 'No description available.'
+      if command in self.macros: docstr = self.macros[command].docstr.rstrip()
+      elif self.primit[command].__doc__ != None: docstr = self.primit[command].__doc__ 
+      stdout.write(docstr+'\n\n'+ift(len(self.grammar[command]) > 0, 'Arguments:\n', 'No arguments needed.\n'))
+      for arg in self.grammar[command]:
+          desc, defval = argtype[before(':', arg)], '\n'
+          if '|' in arg: desc = 'any of { %s }' % ', '.join(after('=',arg).split('|'))
+          elif '=' in arg: defval = ' (default: '+after('=', arg)+')\n'
+          stdout.write('%s: %s%s' % (argname(arg).replace('...', '').rjust(15), desc, defval))
+
+if __name__ == '__main__':
+    try:
+        opts, args = getopt.getopt(argv[1:], 'he:c:VO:r')
+        optdict, ecode, ivars = dict(opts), '', []
+        if '-V' in optdict: exit(programHelp)
+        if '-O' in optdict: ivars = [(before('=', x), after('=', x)) for x in optdict['-O'].split(',')]
+        tadapro = CommandInterpreter()
+        tadapro.ExecuteScript(initcode.split(';'), False, ivars)
+        tadapro.commands.sort()
+        if os.path.exists(rcfile): tadapro.ExecuteScript(file(rcfile).readlines(), localvars=False)
+        if '-h' in optdict: tadapro.ExecuteCommand('help') ; exit(1)
+        autoload = tadapro.variables['autoload']
+        if len(args) == 1 and args[0] == '-': tadapro.ExecuteCommand(autoload.replace('$file', '-'))
+        else: 
+           for fname in args: tadapro.ExecuteCommand(autoload.replace('$file', '\"'+fname+'\"'))
+        if '-e' in optdict: ecode = file(optdict['-e']).readlines()
+        if '-c' in optdict: ecode = optdict['-c'].split(';')
+        if ecode != '':
+           if '-r' in optdict: 
+              for arg in args: tadapro.ExecuteScript(ecode, extravars=[('[1]', arg)], showret=True)
+           else: tadapro.ExecuteScript(ecode, extravars=[('[%d]' % (k+1), arg) for k, arg in enumerate(args)], showret=True)
+        else: 
+           readline.parse_and_bind("tab: complete")
+           readline.set_completer(tadapro.InternalCompleter)
+           readline.set_completer_delims(' ;')
+           histfile = os.path.expanduser(tadapro.variables['historyfile'])
+           if os.path.exists(histfile): readline.read_history_file(histfile)
+           stdout.write(banner % {'name': pName, 'ver': pVersion, 'cpright': cpright, 'pyver': fmtjoin(str,version_info[0:3],'.')}+'\n')
+           while True: 
+                 tadapro.MainLoop()
+                 if not tadapro.variables['sys']['interactive']: break
+           if hasattr(readline, 'remove_history_item'):
+              bag, hl = [], readline.get_current_history_length()
+              for i in range(hl):
+                  j = hl-i-1
+                  h = readline.get_history_item(j+1)
+                  if h.strip() in bag: readline.remove_history_item(j)
+                  else: bag.append(h.strip())
+           readline.write_history_file(histfile)
+    except getopt.GetoptError: exit(programHelp)
+    except TDPError, e: stdout.write(str(e)+'\n')
+    except EnvironmentError, e: stdout.write('[System Error] '+str(e)+'\n')
+
